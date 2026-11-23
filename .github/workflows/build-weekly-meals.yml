@@ -1,0 +1,47 @@
+name: Build Weekly Meals V1 firmware
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    container:
+      image: espressif/idf:v5.5.3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack weekly meals V1 source
+        run: |
+          python3 - <<'PY'
+          import base64,lzma,tarfile,io
+          with open('weekly-v1-source.tar.xz.b64','rt') as fp:
+              data=base64.b64decode(fp.read().strip())
+          with tarfile.open(fileobj=io.BytesIO(lzma.decompress(data))) as tar:
+              tar.extractall('weekly_source',filter='data')
+          PY
+      - name: Checkout FoloToy BSP and ESP-IDF project
+        uses: actions/checkout@v4
+        with:
+          repository: FoloToy/ai-passport
+          ref: main
+          path: upstream
+      - name: Apply custom weekly-meals application
+        run: |
+          cp weekly_source/main/main.c weekly_source/main/weekly_ui.c weekly_source/main/weekly_ui.h weekly_source/main/weekly_assets.h weekly_source/main/weekly_menu.h weekly_source/main/CMakeLists.txt upstream/main/
+      - name: Compile ESP32-C3 full flash firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          . /opt/esp/idf/export.sh
+          cd upstream
+          ./tools/validate.sh --firmware
+          test -s build/FoloToy-AI-Passport-full.bin
+          cp build/FoloToy-AI-Passport-full.bin build/WeeklyMeals-V1-full.bin
+      - name: Archive PassportSim firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeeklyMeals-V1-ESP-IDF-full
+          path: upstream/build/WeeklyMeals-V1-full.bin
+          if-no-files-found: error
