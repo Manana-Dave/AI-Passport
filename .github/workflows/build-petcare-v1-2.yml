@@ -1,0 +1,96 @@
+name: Build Pet Care Reminder V1.2
+on:
+  push:
+    branches: [petcare-reminder-v1-2]
+    paths:
+      - "patches/**"
+      - "assets/**"
+      - ".github/workflows/build-petcare-v1-2.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  firmware:
+    runs-on: ubuntu-22.04
+    container:
+      image: espressif/idf:v5.5.3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify and unpack pet-care V1
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, base64, io, lzma, tarfile
+          b64=b''.join(Path('source_parts/part%d.b64'%i).read_bytes() for i in range(5))
+          binary=base64.b64decode(b64, validate=True)
+          digest=hashlib.sha256(binary).hexdigest()
+          expected='fa4013990aafc5ba6869f827bdc75eaf2cb43646f0fa20eecfb8349414bcf174'
+          if digest!=expected: raise ValueError('source archive SHA256 mismatch: '+digest)
+          with tarfile.open(fileobj=io.BytesIO(lzma.decompress(binary))) as archive:
+              archive.extractall('custom',filter='data')
+          for name in ['main.c','reminder_core.c','care_ui.c','care_font.h','CMakeLists.txt']:
+              assert Path('custom/main',name).is_file(),name
+          print('Verified and unpacked pet-care source',digest)
+          PY
+      - name: Checkout FoloToy official ESP-IDF BSP
+        uses: actions/checkout@v4
+        with:
+          repository: FoloToy/ai-passport
+          ref: main
+          path: upstream
+      - name: Install dedicated pet-care application
+        shell: bash
+        run: |
+          cp custom/main/* upstream/main/
+      - name: Verify and apply V1.1 body-proportion patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, lzma, hashlib, subprocess
+          src=Path('patches/petcare_v1_1.patch.xz.b64').read_text().strip()
+          patch=lzma.decompress(base64.b64decode(src,validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '72081bbc75ec0bb93230c4daaf93191986aae743980f3969018571d4984cfa64', 'V1.1 patch checksum mismatch'
+          subprocess.run(['patch','-p1','--directory=upstream','--batch','--forward'],input=patch,check=True)
+          sha=hashlib.sha256(Path('upstream/main/care_ui.c').read_bytes()).hexdigest()
+          assert sha == '347757e8c462df44095d8887f22ea1f2785322a68dba55c728a6be8ca9ffa26c', 'V1.1 sprite source checksum mismatch'
+          print('V1.1 patch applied and verified:',sha)
+          PY
+      - name: Verify V1.2 font and NianNian palette
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, lzma, subprocess
+          font_path=Path('upstream/main/care_font.h')
+          font=lzma.decompress(base64.b64decode(Path('assets/care_font_v1_2.h.xz.b64').read_text().strip(),validate=True))
+          assert hashlib.sha256(font).hexdigest() == '810defba1baa2bd6b484a11f15dfa0188427be6ac1561c1abb574d1b5924e534', 'bad font SHA-256'
+          font_path.write_bytes(font)
+          patch=lzma.decompress(base64.b64decode(Path('patches/petcare_v1_2_ui.diff.xz.b64').read_text().strip(),validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'b7d84d7e0212bf2e0174c48e850cbfaf6d0b33ad230eb49cb1ff1413679afb19', 'bad UI patch SHA-256'
+          subprocess.run(['patch','-p1','--directory=upstream','--batch','--forward'],input=patch,check=True)
+          content=Path('upstream/main/care_ui.c').read_bytes()
+          assert hashlib.sha256(content).hexdigest() == '29d11e09baa4701427c687db2f64217d306997101ad4541fd6d2456b2bf45d08'
+          assert b'0xE9BF75u' in content
+          print('Pixel sprites and Chinese font verified for V1.2')
+          PY
+      - name: Compile and validate complete ESP32-C3 firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          source /opt/esp/idf/export.sh
+          cd upstream
+          ./tools/validate.sh --firmware
+          test -s build/FoloToy-AI-Passport-full.bin
+          cp build/FoloToy-AI-Passport-full.bin build/PetCare-Reminder-V1.2-full.bin
+      - name: Upload PassportSim BIN
+        uses: actions/upload-artifact@v4
+        with:
+          name: PetCare-Reminder-V1.2-full
+          path: upstream/build/PetCare-Reminder-V1.2-full.bin
+          if-no-files-found: error
+          retention-days: 30
